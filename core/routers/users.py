@@ -26,7 +26,7 @@ async def get_me(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
         )
-
+    # Получаем auth user
     return current_user
 
 
@@ -38,7 +38,14 @@ async def update_user(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_helper.session_getter),
 ):
-    return await user_services.update_user(current_user, data, session)
+    # Обновляем user
+    user = await user_services.update_user(
+        current_user=current_user,
+        data=data,
+        session=session,
+    )
+
+    return user
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
@@ -46,4 +53,10 @@ async def delete_user(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_helper.session_getter),
 ):
-    return await user_services.delete_user(current_user, session)
+    # Удаляем user
+    await user_services.delete_user(
+        current_user=current_user,
+        session=session,
+    )
+
+    return {"message": "User deleted successfully"}
