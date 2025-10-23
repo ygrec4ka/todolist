@@ -18,7 +18,7 @@ class UserService:
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def update_profile(
+    async def update_user_profile(
         user: User,
         data: UserUpdate,
         session: AsyncSession,
@@ -31,7 +31,7 @@ class UserService:
         return user
 
     @staticmethod
-    async def delete_user(
+    async def delete_user_account(
         user: User,
         session: AsyncSession,
     ) -> None:
