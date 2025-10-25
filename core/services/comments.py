@@ -1,12 +1,17 @@
 from typing import Sequence
 
-from fastapi import HTTPException, status
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, Result
 
 from core.models import Comment, User, Task, Note
 from core.schemas.comments import CommentCreate, CommentUpdate
+from core.exceptions.comments import (
+    CommentNotFoundException,
+    CommentAccessDeniedException,
+)
+from core.exceptions.tasks import TaskNotFoundException
+from core.exceptions.notes import NoteNotFoundException
+from core.exceptions import ValidationException
 
 
 class CommentServices:
@@ -15,32 +20,38 @@ class CommentServices:
         comment_create: CommentCreate,
         session: AsyncSession,
         current_user: User,
-    ):
+        task_id: int | None = None,
+        note_id: int | None = None,
+    ) -> Comment:
         try:
-            if not comment_create.task_id and not comment_create.note_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Comment must be attached to a task or note",
+            # Проверяем что передан ровно один ID
+            if not task_id and not note_id:
+                raise ValidationException("Comment must be attached to a task or note")
+
+            if task_id and note_id:
+                raise ValidationException(
+                    "Comment can only be attached to either a task or note, not both"
                 )
 
-            if comment_create.task_id:
-                task = await session.get(Task, comment_create.task_id)
+            # Проверяем существование задачи или заметки
+            if task_id:
+                task = await session.get(Task, task_id)
                 if not task:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Task note found",
-                    )
+                    raise TaskNotFoundException()
+                if task.user_id != current_user.id:
+                    raise CommentAccessDeniedException()
 
-            if comment_create.note_id:
-                note = await session.get(Note, comment_create.note_id)
+            if note_id:
+                note = await session.get(Note, note_id)
                 if not note:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Note note found",
-                    )
+                    raise NoteNotFoundException()
+                if note.user_id != current_user.id:
+                    raise CommentAccessDeniedException()
 
             comment = Comment(
-                **comment_create.model_dump(),
+                content=comment_create.content,
+                task_id=task_id,
+                note_id=note_id,
                 user_id=current_user.id,
             )
 
@@ -50,12 +61,17 @@ class CommentServices:
 
             return comment
 
+        except (
+            ValidationException,
+            TaskNotFoundException,
+            NoteNotFoundException,
+            CommentAccessDeniedException,
+        ):
+            await session.rollback()
+            raise
         except Exception:
             await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Comment creation failed. Please try again",
-            )
+            raise ValidationException("Comment creation failed. Please try again")
 
     @staticmethod
     async def get_task_comments(
@@ -64,20 +80,17 @@ class CommentServices:
         current_user: User,
     ) -> Sequence[Comment]:
         task = await session.get(Task, task_id)
-        # Проверяем что задача существует и принадлежит пользователю
-        if not task or task.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
-            )
+        if not task:
+            raise TaskNotFoundException()
+        if task.user_id != current_user.id:
+            raise CommentAccessDeniedException()
 
         stmt = (
             select(Comment)
             .where(Comment.task_id == task_id)
-            .order_by(Comment.created_at.asc())  # Сортируем по дате
+            .order_by(Comment.created_at.asc())
         )
-
         result: Result = await session.execute(stmt)
-
         return result.scalars().all()
 
     @staticmethod
@@ -87,19 +100,17 @@ class CommentServices:
         current_user: User,
     ) -> Sequence[Comment]:
         note = await session.get(Note, note_id)
-        # Проверяем что записка существует и принадлежит пользователю
-        if not note or note.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Note not found"
-            )
+        if not note:
+            raise NoteNotFoundException()
+        if note.user_id != current_user.id:
+            raise CommentAccessDeniedException()
 
         stmt = (
             select(Comment)
             .where(Comment.note_id == note_id)
-            .order_by(Comment.created_at.asc())  # Сортируем по дате
+            .order_by(Comment.created_at.asc())
         )
         result: Result = await session.execute(stmt)
-
         return result.scalars().all()
 
     @staticmethod
@@ -108,17 +119,14 @@ class CommentServices:
         session: AsyncSession,
         current_user: User,
     ) -> Comment:
-        stmt = select(Comment).where(
-            Comment.id == comment_id,
-            Comment.user_id == current_user.id,
-        )
+        stmt = select(Comment).where(Comment.id == comment_id)
         result: Result = await session.execute(stmt)
         comment = result.scalar_one_or_none()
 
         if not comment:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found"
-            )
+            raise CommentNotFoundException()
+        if comment.user_id != current_user.id:
+            raise CommentAccessDeniedException()
 
         return comment
 
@@ -129,7 +137,6 @@ class CommentServices:
         session: AsyncSession,
         current_user: User,
     ) -> Comment:
-        # Получаем комментарий (проверяем что он существует и принадлежит пользователю)
         comment = await CommentServices.get_comment(comment_id, session, current_user)
 
         for key, value in comment_update.model_dump(exclude_unset=True).items():
@@ -137,7 +144,6 @@ class CommentServices:
 
         await session.commit()
         await session.refresh(comment)
-
         return comment
 
     @staticmethod
@@ -147,7 +153,6 @@ class CommentServices:
         current_user: User,
     ) -> None:
         comment = await CommentServices.get_comment(comment_id, session, current_user)
-
         await session.delete(comment)
         await session.commit()
 
