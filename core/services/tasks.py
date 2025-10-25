@@ -1,13 +1,14 @@
 from typing import Sequence
 
-from fastapi import HTTPException, status
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, Result
+from sqlalchemy.orm import selectinload
 
 from core.models import User
 from core.schemas.tasks import TaskCreate, TaskUpdate
 from core.models.tasks import Task
+from core.exceptions.tasks import TaskNotFoundException, TaskAccessDeniedException
+from core.exceptions import ValidationException
 
 
 class TaskServices:
@@ -16,7 +17,7 @@ class TaskServices:
         task_create: TaskCreate,
         session: AsyncSession,
         current_user: User,
-    ):
+    ) -> Task:
         try:
             task = Task(
                 **task_create.model_dump(),
@@ -26,15 +27,11 @@ class TaskServices:
             session.add(task)
             await session.commit()
             await session.refresh(task)
-
             return task
 
         except Exception:
             await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Task creation failed. Please try again",
-            )
+            raise ValidationException("Task creation failed. Please try again")
 
     @staticmethod
     async def get_task(
@@ -42,17 +39,16 @@ class TaskServices:
         session: AsyncSession,
         current_user: User,
     ) -> Task:
-        stmt = select(Task).where(
-            Task.id == task_id,
-            Task.user_id == current_user.id,
+        stmt = (
+            select(Task).options(selectinload(Task.comments)).where(Task.id == task_id)
         )
         result: Result = await session.execute(stmt)
         task = result.scalar_one_or_none()
 
         if not task:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
-            )
+            raise TaskNotFoundException()
+        if task.user_id != current_user.id:
+            raise TaskAccessDeniedException()
 
         return task
 
@@ -67,7 +63,6 @@ class TaskServices:
             .order_by(Task.created_at.desc())
         )
         result: Result = await session.execute(stmt)
-
         return result.scalars().all()
 
     @staticmethod
@@ -78,6 +73,7 @@ class TaskServices:
         current_user: User,
     ) -> Task:
         task = await TaskServices.get_task(task_id, session, current_user)
+
         for key, value in data.model_dump(exclude_unset=True).items():
             setattr(task, key, value)
 
@@ -92,7 +88,6 @@ class TaskServices:
         current_user: User,
     ) -> None:
         task = await TaskServices.get_task(task_id, session, current_user)
-
         await session.delete(task)
         await session.commit()
 
