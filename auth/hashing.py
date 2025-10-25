@@ -2,7 +2,7 @@ import bcrypt
 
 
 class HashingPassword:
-    # Хешируем пароль
+    # Хэшируем пароль
     @staticmethod
     def hash_password(
         password: str,
