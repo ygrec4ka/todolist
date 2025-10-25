@@ -1,13 +1,14 @@
 from typing import Sequence
 
-from fastapi import HTTPException, status
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, Result
+from sqlalchemy.orm import selectinload
 
 from core.models import User
 from core.schemas.notes import NoteCreate, NoteUpdate
 from core.models.notes import Note
+from core.exceptions.notes import NoteNotFoundException, NoteAccessDeniedException
+from core.exceptions import ValidationException
 
 
 class NoteServices:
@@ -16,7 +17,7 @@ class NoteServices:
         note_create: NoteCreate,
         session: AsyncSession,
         current_user: User,
-    ):
+    ) -> Note:
         try:
             note = Note(
                 **note_create.model_dump(),
@@ -26,15 +27,11 @@ class NoteServices:
             session.add(note)
             await session.commit()
             await session.refresh(note)
-
             return note
 
         except Exception:
             await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Note creation failed. Please try again",
-            )
+            raise ValidationException("Note creation failed. Please try again")
 
     @staticmethod
     async def get_note(
@@ -42,18 +39,16 @@ class NoteServices:
         session: AsyncSession,
         current_user: User,
     ) -> Note:
-        stmt = select(Note).where(
-            Note.id == note_id,
-            Note.user_id == current_user.id,
+        stmt = (
+            select(Note).options(selectinload(Note.comments)).where(Note.id == note_id)
         )
         result: Result = await session.execute(stmt)
         note = result.scalar_one_or_none()
 
         if not note:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Note not found",
-            )
+            raise NoteNotFoundException()
+        if note.user_id != current_user.id:
+            raise NoteAccessDeniedException()
 
         return note
 
@@ -68,7 +63,6 @@ class NoteServices:
             .order_by(Note.created_at.desc())
         )
         result: Result = await session.execute(stmt)
-
         return result.scalars().all()
 
     @staticmethod
@@ -79,6 +73,7 @@ class NoteServices:
         current_user: User,
     ) -> Note:
         note = await NoteServices.get_note(note_id, session, current_user)
+
         for key, value in data.model_dump(exclude_unset=True).items():
             setattr(note, key, value)
 
@@ -93,7 +88,6 @@ class NoteServices:
         current_user: User,
     ) -> None:
         note = await NoteServices.get_note(note_id, session, current_user)
-
         await session.delete(note)
         await session.commit()
 
